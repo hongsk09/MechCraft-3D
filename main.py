@@ -1,106 +1,96 @@
-  pointer.x=((event.clientX-rect.left)/rect.width)*2-1;
-  pointer.y=-((event.clientY-rect.top)/rect.height)*2+1;
-  raycaster.setFromCamera(pointer,camera);
-  const roots=[...objects.values()].map(rec=>rec.root);
-  const hits=raycaster.intersectObjects(roots,true);
-  if (hits.length) {
-    let node=hits[0].object;
-    let id=null;
-    while (node && !id) { id=node.userData.ownerId; node=node.parent; }
-    if (id) selectObject(id);
-  } else if (!pendingAttachId) {
-    selectObject(null);
-  }
-}
-renderer.domElement.addEventListener('pointerdown',onPointerDown);
-renderer.domElement.addEventListener('pointerup',onPointerUp);
-renderer.domElement.addEventListener('contextmenu',e=>e.preventDefault());
+import streamlit as st
 
-$('modeSelect').addEventListener('click',()=>selectTool('select'));
-$('modeMove').addEventListener('click',()=>selectTool('translate'));
-$('modeRotate').addEventListener('click',()=>selectTool('rotate'));
-$('modeScale').addEventListener('click',()=>selectTool('scale'));
-document.querySelectorAll('.part-btn').forEach(btn=>btn.addEventListener('click',()=>addObject(btn.dataset.type)));
-$('attachBtn').addEventListener('click',startAttachMode);
-$('detachBtn').addEventListener('click',detachSelected);
-$('startBtn').addEventListener('click',()=>{
-  if (!physicsEnabled) { setStatus('물리 ON을 먼저 활성화하세요.'); return; }
-  if (!physicsActive) startSimulation();
-  else { running=!running; updateSimulationUI(); setStatus(running?'시뮬레이션 재개':'시뮬레이션 일시정지'); }
-});
-$('stopBtn').addEventListener('click',()=>stopSimulation(true));
-$('physicsEnabled').addEventListener('change',e=>{
-  physicsEnabled=e.target.checked;
-  if (!physicsEnabled && physicsActive) stopSimulation(true);
-  setStatus(physicsEnabled?'물리 기능 활성화':'물리 기능 비활성화');
-});
-$('gravityToggle').addEventListener('change',e=>{
-  setGravityEnabled(e.target.checked);
-  setStatus(e.target.checked?'중력 적용':'중력 해제');
-});
-$('homeView').addEventListener('click',()=>{
-  camera.position.set(8,7,10); orbit.target.set(0,1,0); orbit.update();
-});
-$('gridToggle').addEventListener('click',()=>{
-  showGrid=!showGrid; grid.visible=showGrid;
-  $('gridToggle').textContent=showGrid?'그리드 숨김':'그리드 표시';
-});
-
-function resize() {
-  const w=Math.max(1,viewport.clientWidth), h=Math.max(1,viewport.clientHeight);
-  camera.aspect=w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h,false);
-}
-const resizeObserver=new ResizeObserver(resize);
-resizeObserver.observe(viewport);
-resize();
-
-function animate(now) {
-  requestAnimationFrame(animate);
-  const dt=Math.min((now-lastFrame)/1000,0.05);
-  lastFrame=now;
-  if (physicsActive && running) stepSimulation(dt);
-  orbit.update();
-  if (selectionBox) selectionBox.update();
-  renderer.render(scene,camera);
-}
-requestAnimationFrame(animate);
-updateSimulationUI();
-updateProperties();
-refreshObjectList();
-setStatus('준비 완료 · 부품을 생성해 보세요.');
-
-window.addEventListener('unhandledrejection',event=>{
-  console.error(event.reason);
-  setStatus('모듈 또는 시뮬레이션 오류: 브라우저 콘솔을 확인하세요.');
-});
-window.addEventListener('error',event=>{
-  console.error(event.error || event.message);
-  setStatus('렌더링 오류가 발생했습니다. 브라우저 콘솔을 확인하세요.');
-});
-</script>
-</body>
-</html>'''
-
-st.title("MechaLab 3D")
-st.caption("웹 기반 기계 부품 설계 및 기초 물리 시뮬레이터")
-st.iframe(
-    APP_HTML,
-    height=930,
-    tab_index=0,
-    alt="MechaLab 3D 기계 부품 편집기 및 물리 시뮬레이터",
+st.set_page_config(
+    page_title="MechaLab 3D | 웹 기반 기계 시뮬레이터",
+    page_icon="⚙️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-with st.expander("실행 및 사용 안내"):
-    st.markdown(
-        """
-        1. 터미널에서 `pip install -r requirements.txt`를 실행합니다.
-        2. 같은 폴더에서 `streamlit run main.py`를 실행합니다.
-        3. 부품을 추가하고 선택한 뒤, 우측 속성 패널 또는 상단 기즈모로 편집합니다.
-        4. 자식 부품을 먼저 선택하고 **결합 모드**를 누른 다음 부모 부품을 선택합니다.
-        5. 물리 ON 상태에서 **실행**을 누르면 중력과 근사 충돌 시뮬레이션이 시작됩니다.
-        6. **초기화**를 누르면 설계 단계의 배치로 돌아옵니다.
+st.markdown(
+    """
+    <style>
+      .block-container {padding: 0.35rem 0.65rem 0.6rem 0.65rem; max-width: 100%;}
+      header[data-testid="stHeader"] {height: 0.2rem;}
+      [data-testid="stToolbar"] {display: none;}
+      footer {visibility: hidden;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-        **참고:** Three.js와 cannon-es는 브라우저에서 CDN으로 로드됩니다. 처음 실행할 때 인터넷 연결이 필요합니다.
-        현재 물리 충돌체는 부품 형상에 맞춘 단순 근사 도형입니다. 스프링 변형, 정밀 기어 치합, 베어링·접촉 마찰, 모터 토크 전달을 해석하는 산업용 정밀 해석기는 아닙니다.
-        """
-    )
+APP_HTML = r'''<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MechaLab 3D</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/",
+    "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+  }
+}
+</script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0c111b;
+    --panel: #111a28;
+    --panel2: #172235;
+    --line: #26364d;
+    --text: #e7edf7;
+    --muted: #93a4bb;
+    --accent: #48a9ff;
+    --accent2: #1d75c9;
+    --green: #34c98b;
+    --red: #f07878;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; width:100%; height:100%; overflow:hidden; background:var(--bg); color:var(--text); font-family:Inter, Pretendard, "Noto Sans KR", system-ui, sans-serif; }
+  button, input { font:inherit; }
+  .app { height:900px; min-height:680px; display:grid; grid-template-rows:58px 1fr 30px; border:1px solid #223149; background:var(--bg); overflow:hidden; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 14px; background:#101827; border-bottom:1px solid var(--line); }
+  .brand { display:flex; align-items:center; gap:10px; min-width:190px; }
+  .logo { width:32px; height:32px; display:grid; place-items:center; border-radius:9px; background:linear-gradient(145deg,#2b8fe7,#14518f); font-size:18px; }
+  .brand strong { display:block; font-size:14px; letter-spacing:.2px; }
+  .brand small { color:var(--muted); font-size:10px; display:block; margin-top:2px; }
+  .toolbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:center; }
+  .tool-btn, .action-btn, .part-btn, .list-btn { border:1px solid var(--line); color:#dbe7f7; background:#182438; border-radius:7px; cursor:pointer; transition:.15s ease; }
+  .tool-btn { padding:7px 11px; font-size:12px; }
+  .tool-btn:hover, .action-btn:hover, .part-btn:hover, .list-btn:hover { border-color:#4d86ba; background:#20334d; }
+  .tool-btn.active { border-color:var(--accent); background:#123b62; color:#fff; box-shadow:inset 0 0 0 1px #237cc4; }
+  .top-actions { display:flex; gap:7px; align-items:center; min-width:220px; justify-content:flex-end; }
+  .action-btn { padding:7px 10px; font-size:12px; }
+  .action-btn.primary { background:#1167a8; border-color:#2687d0; color:#fff; }
+  .action-btn.danger { color:#ffb2b2; }
+  .layout { min-height:0; display:grid; grid-template-columns:205px minmax(250px,1fr) 270px; }
+  .side { min-height:0; overflow:auto; background:var(--panel); }
+  .left { border-right:1px solid var(--line); padding:13px 11px; }
+  .right { border-left:1px solid var(--line); padding:13px 12px; }
+  .section-title { text-transform:uppercase; letter-spacing:.8px; color:#9cafc7; font-size:10px; font-weight:800; margin:2px 0 10px; }
+  .part-grid { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+  .part-btn { min-height:61px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; font-size:11px; }
+  .part-btn .glyph { font-size:20px; line-height:1; }
+  .hint { color:var(--muted); font-size:10px; line-height:1.55; margin:10px 1px 15px; }
+  .divider { height:1px; background:var(--line); margin:13px 0; }
+  .object-list { display:flex; flex-direction:column; gap:5px; }
+  .list-btn { padding:8px; display:flex; align-items:center; justify-content:space-between; width:100%; text-align:left; font-size:11px; }
+  .list-btn.selected { border-color:#348ed1; background:#123453; }
+  .list-btn small { color:#8094ad; font-size:9px; }
+  .viewport-wrap { min-width:0; min-height:0; position:relative; background:#0b121d; }
+  #viewport { position:absolute; inset:0; }
+  #viewport canvas { display:block; width:100%; height:100%; outline:none; }
+  .view-badge { position:absolute; left:13px; top:12px; padding:6px 9px; border:1px solid #34445d; background:#111c2acc; border-radius:6px; color:#a9bbd1; font-size:10px; pointer-events:none; }
+  .view-help { position:absolute; left:13px; bottom:12px; padding:7px 9px; background:#101a28d9; border:1px solid #30415a; color:#a6b6cb; border-radius:6px; font-size:10px; pointer-events:none; line-height:1.5; }
+  .view-actions { position:absolute; right:12px; top:12px; display:flex; gap:5px; }
+  .mini-btn { border:1px solid #34445d; color:#c9d7e9; background:#101a28dd; border-radius:6px; padding:6px 8px; font-size:10px; cursor:pointer; }
+  .mini-btn:hover { background:#1c2d45; }
+  .prop-empty { color:var(--muted); font-size:11px; line-height:1.6; padding:10px 1px; }
+  .selected-name { font-size:13px; font-weight:750; margin-bottom:3px; }
+  .selected-type { font-size:10px; color:var(--muted); margin-bottom:13px; }
+  .field-title { color:#b9c8dc; font-size:10px; font-weight:700; margin:12px 0 6px; }
+  .xyz-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; }
+  .field { min-width:0; }
