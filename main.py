@@ -248,7 +248,7 @@ scene.add(fillLight);
 const floorMat = new THREE.MeshStandardMaterial({ color:0x172333, roughness:0.95, metalness:0.05 });
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), floorMat);
 floor.rotation.x = -Math.PI / 2;
-floor.position.y = -0.045;
+floor.position.y = 0;
 floor.receiveShadow = true;
 scene.add(floor);
 let grid = new THREE.GridHelper(100, 100, 0x3a536e, 0x27394f);
@@ -425,7 +425,7 @@ function addObject(type) {
   const record = {
     id, type, label:`${TYPE_NAME[type]} ${nextId-1}`, color,
     root, mass: type==='wheel'?1.4:1.0, motorSpeed:5.0,
-    attachedTo:null, body:null, shaftBody:null, initial:null,
+    attachedTo:null, body:null, shaftBody:null, initial:null, initialParent:null,
     previousKinematicPosition:null
   };
   objects.set(id,record);
@@ -734,6 +734,8 @@ function createBodyForRecord(rec) {
   if (rec.type==='motor') {
     const shape=new CANNON.Box(new CANNON.Vec3(0.575*rec.root.scale.x,0.475*rec.root.scale.y,0.45*rec.root.scale.z));
     const body=new CANNON.Body({mass:0,shape,material:makePhysicsMaterial()});
+    body.collisionFilterGroup=2;
+    body.collisionFilterMask=-1;
     const pose=getWorldPose(rec.root);
     body.position.set(pose.pos.x,pose.pos.y,pose.pos.z);
     body.quaternion.copy(threeToCannonQuaternion(pose.quat,'box'));
@@ -742,6 +744,8 @@ function createBodyForRecord(rec) {
 
     const shaftShape=new CANNON.Cylinder(0.16,0.16,1.2,16);
     const shaft=new CANNON.Body({mass:0,shape:shaftShape,material:makePhysicsMaterial(),type:CANNON.Body.KINEMATIC});
+    shaft.collisionFilterGroup=4;
+    shaft.collisionFilterMask=-1;
     const pivot=rec.root.userData.shaftPivot;
     if (pivot) {
       const shaftPos=new THREE.Vector3(0,0,0.52);
@@ -758,15 +762,19 @@ function createBodyForRecord(rec) {
     return;
   }
   const shape=createShape(rec);
-  const isAttached=!!rec.attachedTo;
+  const parent=rec.attachedTo ? objects.get(rec.attachedTo) : null;
+  // 모터 축에 결합된 바퀴는 동적 강체로 둬야 바닥과의 접촉 마찰로 굴러갈 수 있다.
+  // 일반 결합 부품은 기존처럼 운동학적 물체로 부모 변환을 따라간다.
+  const motorDrivenWheel=rec.type==='wheel' && parent?.type==='motor';
+  const isAttached=!!rec.attachedTo && !motorDrivenWheel;
   const body=new CANNON.Body({
     mass:isAttached?0:rec.mass,
     shape,
     material:makePhysicsMaterial(),
     type:isAttached?CANNON.Body.KINEMATIC:CANNON.Body.DYNAMIC,
-    linearDamping:0.02,
-    angularDamping:0.12,
-    allowSleep:true,
+    linearDamping:0.015,
+    angularDamping:motorDrivenWheel?0.035:0.12,
+    allowSleep:!motorDrivenWheel,
     sleepSpeedLimit:0.12,
     sleepTimeLimit:1
   });
@@ -774,6 +782,16 @@ function createBodyForRecord(rec) {
   body.position.set(pose.pos.x,pose.pos.y,pose.pos.z);
   const q=threeToCannonQuaternion(pose.quat,rec.type);
   body.quaternion.copy(q);
+  if (motorDrivenWheel) {
+    // 부모 모터/축과의 자기 충돌은 제외하되 바닥(기본 그룹) 및 다른 부품과는 충돌한다.
+    body.collisionFilterGroup=8;
+    body.collisionFilterMask=1 | 8;
+    const pivot=parent.root.userData.shaftPivot;
+    const axis=new THREE.Vector3(0,0,1);
+    if (pivot) axis.applyQuaternion(pivot.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    body.angularVelocity.set(axis.x*parent.motorSpeed,axis.y*parent.motorSpeed,axis.z*parent.motorSpeed);
+    body.wakeUp();
+  }
   body.updateMassProperties();
   physicsWorld.addBody(body);
   rec.body=body;
@@ -789,7 +807,16 @@ function startSimulation() {
   addGround(physicsWorld);
   for (const rec of objects.values()) {
     rec.initial=saveTransform(rec.root);
+    rec.initialParent=rec.root.parent;
     if (rec.type==='motor' && rec.root.userData.shaftPivot) rec.root.userData.shaftPivot.rotation.z=0;
+  }
+  for (const rec of objects.values()) {
+    const parent=rec.attachedTo ? objects.get(rec.attachedTo) : null;
+    if (rec.type==='wheel' && parent?.type==='motor') {
+      // 시뮬레이션 중에는 물리 바디가 바닥 접촉에 따라 움직일 수 있도록 장면 루트로 분리한다.
+      // attachedTo 관계는 유지해 모터 속도를 계속 읽고, 정지 시 원래 축에 되돌린다.
+      scene.attach(rec.root);
+    }
     createBodyForRecord(rec);
   }
   physicsActive=true;
@@ -811,7 +838,11 @@ function stopSimulation(reset=true) {
   }
   physicsWorld=null; groundBody=null; physicsActive=false; running=false; accumulator=0;
   if (reset) {
+    // 모터에 연결된 바퀴는 시뮬레이션 중 장면 루트로 분리했으므로 원래 부모로 복귀시킨다.
     for (const rec of objects.values()) {
+      if (rec.initialParent && rec.initialParent !== scene && rec.root.parent !== rec.initialParent) {
+        rec.initialParent.attach(rec.root);
+      }
       if (rec.initial) restoreTransform(rec.root,rec.initial);
       const pivot=rec.root.userData.shaftPivot;
       if (pivot) pivot.rotation.set(0,0,0);
@@ -873,10 +904,21 @@ function stepSimulation(dt) {
   }
   for (const rec of objects.values()) {
     if (rec.type!=='motor' && rec.attachedTo) syncKinematicBody(rec,dt);
+    if (rec.type==='wheel' && rec.body && rec.body.type===CANNON.Body.DYNAMIC && rec.attachedTo) {
+      const parent=objects.get(rec.attachedTo);
+      if (parent?.type==='motor') {
+        const pivot=parent.root.userData.shaftPivot;
+        const axis=new THREE.Vector3(0,0,1);
+        if (pivot) axis.applyQuaternion(pivot.getWorldQuaternion(new THREE.Quaternion())).normalize();
+        // 모터의 회전 속도를 유지하면서 바닥 마찰이 바퀴 중심을 전진시키도록 한다.
+        rec.body.angularVelocity.set(axis.x*parent.motorSpeed,axis.y*parent.motorSpeed,axis.z*parent.motorSpeed);
+        rec.body.wakeUp();
+      }
+    }
   }
-  physicsWorld.step(1/60,dt,4);
+  physicsWorld.step(1/60,dt,6);
   for (const rec of objects.values()) {
-    if (rec.type==='motor' || !rec.body || rec.attachedTo) continue;
+    if (rec.type==='motor' || !rec.body || (rec.attachedTo && rec.body.type===CANNON.Body.KINEMATIC)) continue;
     rec.root.position.set(rec.body.position.x,rec.body.position.y,rec.body.position.z);
     const q=cannonToThreeQuaternion(rec.body.quaternion,rec.type);
     rec.root.quaternion.copy(q);
@@ -997,6 +1039,6 @@ with st.expander("실행 및 사용 안내"):
         6. **초기화**를 누르면 설계 단계의 배치로 돌아옵니다.
 
         **참고:** Three.js와 cannon-es는 브라우저에서 CDN으로 로드됩니다. 처음 실행할 때 인터넷 연결이 필요합니다.
-        현재 물리 충돌체는 부품 형상에 맞춘 단순 근사 도형입니다. 스프링 변형, 정밀 기어 치합, 베어링·접촉 마찰, 모터 토크 전달을 해석하는 산업용 정밀 해석기는 아닙니다.
+        모터에 결합된 바퀴는 동적 물체로 처리해 바닥 접촉 마찰로 구르도록 합니다. 현재 물리 충돌체는 부품 형상에 맞춘 단순 근사 도형입니다. 스프링 변형, 정밀 기어 치합, 베어링·접촉 마찰, 모터 토크 전달을 해석하는 산업용 정밀 해석기는 아닙니다.
         """
     )
